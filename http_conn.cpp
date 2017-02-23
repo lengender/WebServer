@@ -4,7 +4,6 @@
 	> Mail: 
 	> Created Time: 2017年02月21日 星期二 12时07分18秒
  ************************************************************************/
-
 #include"http_conn.h"
 
 //定义HTTP响应的一些状态信息
@@ -19,8 +18,7 @@ const char *error_500_title = "Internal Error";
 const char *error_500_form = "There was an unusual problem serving the requested file.\n";
 
 //网站根目录
-const char *doc_root = "/home/nice/unix/webserver/html"
-
+const char *doc_root = "/home/nice/unix/webserver/html";
 
 int setnonblocking(int fd)
 {
@@ -58,8 +56,11 @@ void modfd(int epollfd, int fd, int ev)
     epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
 }
 
+
+
 int http_conn::m_user_count = 0;
 int http_conn::m_epollfd = -1;
+time_heap* http_conn::m_timer_heap = NULL;
 
 void http_conn::close_conn(bool real_close)
 {
@@ -67,7 +68,8 @@ void http_conn::close_conn(bool real_close)
     {
         removefd(m_epollfd, m_sockfd);
         m_sockfd = -1;
-       m_user_count--; //关闭一个连接时，将客户总量建一
+        m_user_count--; //关闭一个连接时，将客户总量建一
+        m_timer_heap->del_timer(m_timer);
     }
 }
 
@@ -82,14 +84,26 @@ void http_conn::init(int sockfd, const struct sockaddr_in &addr)
 
     addfd(m_epollfd, sockfd, true);
     m_user_count++;
+    
+    //加入定时器
+    m_timer = new heap_timer(3 * TIMESLOT);
+    if(!m_timer)
+    {
+        throw std::exception();
+    }
 
+    m_timer->sockfd = &m_sockfd;
+    m_timer->cb_func = cb_func;
+
+    m_timer_heap->add_timer(m_timer);
+    
     init();
 }
 
 
 void http_conn::init()
 {
-    m_check_state = CHECK_STATE_REQUESTLINE;
+    m_checked_state = CHECK_STATE_REQUESTLINE;
     m_linger = false;
 
     m_method = GET;
@@ -103,7 +117,7 @@ void http_conn::init()
     m_write_idx = 0;
     memset(m_read_buf, '\0', READ_BUFFER_SIZE);
     memset(m_write_buf, '\0', WRITE_BUFFER_SIZE);
-    memset(m_real_file, '\0', FILENAME_LEN);
+    memset(m_read_file, '\0', FILENAME_LEN);
 }
 
 //从状态机
@@ -218,7 +232,7 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char *text)
         return BAD_REQUEST;
     }
 
-    m_check_state = CHECK_STATE_HEADER;
+    m_checked_state = CHECK_STATE_HEADER;
     return NO_REQUEST;
 }
 
@@ -232,7 +246,7 @@ http_conn::HTTP_CODE http_conn::parse_headers(char *text)
         //转移到CHECK_STATE_CONTENT状态
         if(m_content_length != 0)
         {
-            m_check_state = CHECK_STATE_CONTENT;
+            m_checked_state = CHECK_STATE_CONTENT;
             return NO_REQUEST;
         }
 
@@ -290,17 +304,19 @@ http_conn::HTTP_CODE http_conn::process_read()
     HTTP_CODE ret = NO_REQUEST;
     char *text = 0;
 
-    while(((m_check_state == CHECK_STATE_CONTENT) && (line_status == LINE_OK))
+    while(((m_checked_state == CHECK_STATE_CONTENT) && (line_status == LINE_OK))
          || ((line_status = parse_line()) == LINE_OK))
     {
         text = get_line();
         m_start_line = m_checked_idx;
         printf("got 1 http line: %s\n", text);
 
-        switch(m_check_state)
+        
+        switch(m_checked_state)
         {
             case CHECK_STATE_REQUESTLINE:
             {
+                printf("CHECK_STATE_REQUESTLINE\n");
                 ret = parse_request_line(text);
                 if(ret == BAD_REQUEST)
                 {
@@ -311,6 +327,7 @@ http_conn::HTTP_CODE http_conn::process_read()
 
             case CHECK_STATE_HEADER:
             {
+                printf("CHECK_STATE_HEADER\n");
                 ret = parse_headers(text);
                 if(ret == BAD_REQUEST)
                 {
@@ -318,6 +335,7 @@ http_conn::HTTP_CODE http_conn::process_read()
                 }
                 else if(ret == GET_REQUEST)
                 {
+                    
                     return do_request();
                 }
                 break;
@@ -325,6 +343,7 @@ http_conn::HTTP_CODE http_conn::process_read()
 
             case CHECK_STATE_CONTENT:
             {
+                printf("CHECK_STATE_CONTENT\n");
                 ret = parse_content(text);
                 if(ret == GET_REQUEST)
                 {
@@ -336,6 +355,7 @@ http_conn::HTTP_CODE http_conn::process_read()
             
             default:
             {
+                printf("default\n");
                 return INTERNAL_ERROR;
             }
         }
@@ -347,13 +367,17 @@ http_conn::HTTP_CODE http_conn::process_read()
 //当得到一个完整正确的HTTP请求时，我们就分析目标文件的属性，如果目标文件存在，
 //对所有用户可读，且不是目录，则使用mmap将其映射到内存地址m_file_address处，
 //并告诉调用者获取文件成功
-http_code::HTTP_CODE http_conn::do_request()
+http_conn::HTTP_CODE http_conn::do_request()
 {
-    strcpy(m_real_file, doc_root);
+    strcpy(m_read_file, doc_root);
     int len = strlen(doc_root);
-    strncpy(m_real_file + len, m_url, FILENAME_LEN - len -1);
+    strncpy(m_read_file + len, m_url, FILENAME_LEN - len -1);
+    if(m_read_file[strlen(m_read_file) - 1] == '/')
+    {
+        strcat(m_read_file, "index.html");
+    }
 
-    if(stat(m_real_file, &m_file_stat) < 0)
+    if(stat(m_read_file, &m_file_stat) < 0)
     {
         return NO_REQUEST;
     }
@@ -365,10 +389,12 @@ http_code::HTTP_CODE http_conn::do_request()
 
     if(S_ISDIR(m_file_stat.st_mode))
     {
-        return BAD_REQUEST;
+        strcat(m_read_file, "/index.html");
+       // return BAD_REQUEST;
     }
 
-    int fd = open(m_real_file, O_RDONLY);
+    printf("path: %s\n", m_read_file);
+    int fd = open(m_read_file, O_RDONLY);
     m_file_address = (char*)mmap(0, m_file_stat.st_size, PROT_READ,
                                 MAP_PRIVATE, fd, 0);
     close(fd);
@@ -388,9 +414,11 @@ void http_conn::unmap()
 //写http响应
 bool http_conn::write()
 {
+    printf("write 响应.\n");
     int temp = 0;
     int bytes_have_send = 0;
     int bytes_to_send = m_write_idx;
+    printf("m_write_idx %d %s\n", m_write_idx, m_write_buf);
     if(bytes_to_send == 0)
     {
         modfd(m_epollfd, m_sockfd, EPOLLIN);
@@ -398,6 +426,7 @@ bool http_conn::write()
         return true;
     }
 
+    bool flag = false;
     while(1)
     {
         temp = writev(m_sockfd, m_iv, m_iv_count);
@@ -411,11 +440,12 @@ bool http_conn::write()
                 return true;
             }
             unmap();
-            return false;
+            break;
         }
 
         bytes_to_send -= temp;
         bytes_have_send += temp;
+        printf("to_send %d  has_send %d temp %d\n",bytes_to_send, bytes_have_send, temp);
         if(bytes_to_send <= bytes_have_send)
         {
             //发送HTTP响应成功，根据http请求中的Connection字段决定是否立即关闭连接
@@ -424,15 +454,18 @@ bool http_conn::write()
             {
                 init();
                 modfd(m_epollfd, m_sockfd, EPOLLIN);
-                return true;
+                flag = true;
+                break;
             }
             else
             {
                 modfd(m_epollfd, m_sockfd, EPOLLIN);
-                return false;
+                break;
             }
         }
     }
+    printf("write end.\n");
+    return flag;
 }
 
 //往写缓冲中写入待发送的数据
@@ -473,12 +506,12 @@ bool http_conn::add_headers(int content_len)
 
 bool http_conn::add_content_length(int content_len)
 {
-    return add_response("Content-Length: %\r\n", content_len);
+    return add_response("Content-Length: %d\r\n", content_len);
 }
 
 bool http_conn::add_linger()
 {
-    return add_response("Connection: %s\r\n", (m_linger == true) > "keep-alive" : "close");
+    return add_response("Connection: %s\r\n", (m_linger == true) ? "keep-alive" : "close");
 }
 
 bool http_conn::add_blank_line()
@@ -582,18 +615,28 @@ bool http_conn::process_write(HTTP_CODE ret)
 //由线程池的工作线程调用，这是处理http请求的入口函数
 void http_conn::process()
 {
+    printf("first.\n");
     HTTP_CODE read_ret = process_read();
+
+    printf("hello: process() 出口  \n");
     if(read_ret == NO_REQUEST)
     {
+        printf("read_ret NO_REQUEST exit\n");
         modfd(m_epollfd, m_sockfd, EPOLLIN);
         return ;
     }
-
+    
+    if(read_ret == FILE_REQUEST) 
+        printf("hahah process_write in. %d\n", read_ret);
     bool write_ret = process_write(read_ret);
+
+    printf("process_write out. %d\n", write_ret ? 1 : 0);
     if(!write_ret)
     {
         close_conn();
     }
 
     modfd(m_epollfd, m_sockfd, EPOLLOUT);
+
+    printf("ok?\n");
 }

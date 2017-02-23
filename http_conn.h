@@ -20,13 +20,17 @@
 #include<sys/stat.h>
 #include<string.h>
 #include<pthread.h>
+#include<stdlib.h>
 #include<stdio.h>
 #include<sys/mman.h>
 #include<stdarg.h>
 #include<errno.h>
 #include"locker.h"
+#include"min_heap_timer.h"
+#include"webserver.h"
 
-
+class heap_timer;
+class time_heap;
 //线程池的模板参数类，用以封装对逻辑任务的处理
 class http_conn
 {
@@ -49,7 +53,7 @@ public:
     enum CHECK_STATE{
         CHECK_STATE_REQUESTLINE = 0,
         CHECK_STATE_HEADER,
-        CHECK_STATE_CONTENT;
+        CHECK_STATE_CONTENT
     };
 
     //从状态机可能的三种状态，即行的读取状态，分别表示：
@@ -58,7 +62,7 @@ public:
         LINE_OK = 0,
         LINE_BAD,
         LINE_OPEN
-    }LINE_STATUS;
+    };
 
     //服务器处理HTTP的请求结果：
     //NO_REQUEST 表示请求不完整，需要继续读取客户数据
@@ -79,9 +83,13 @@ public:
     };
 
 public:
-    http_conn();
-    ~http_conn();
+    http_conn()
+    {
+    }
 
+    ~http_conn()
+    {
+    }
 public:
     //初始化新接受的连接
     void init(int sockfd, const sockaddr_in& addr);
@@ -129,11 +137,16 @@ private:
 public:
     //所有socket的事件都被注册到同一个epoll内核事件表中，所以将epoll文件描述符
     //设置为静态的
-    static int m_epolfd;
+    static int m_epollfd;
 
     //统计用户数量
     static int m_user_count;
 
+    //http连接定时器
+    heap_timer *m_timer;
+
+    //所有连接共享一个时间堆
+    static time_heap *m_timer_heap;
 private:
     //该HTTP连接的socket和对方的socket地址
     int m_sockfd;
@@ -143,7 +156,7 @@ private:
     char m_read_buf[READ_BUFFER_SIZE];
 
     //标识读缓冲区中已经读入的客户数据的最后一个字节的下一个位置
-    int m_read_idex;
+    int m_read_idx;
 
     //当前正在分析的字符在读缓冲区的位置
     int m_checked_idx;
@@ -194,5 +207,13 @@ private:
     struct iovec m_iv[2];
     int m_iv_count;
 };
+
+
+
+//function declare
+int setnonblocking(int fd);
+void addfd(int epollfd, int fd, bool one_shot);
+void removefd(int epollfd, int fd);
+void modfd(int epollfd, int fd, int ev);
 
 #endif

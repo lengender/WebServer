@@ -1,7 +1,10 @@
-a.out: http_parse.o
-	g++ -o a.out http_parse.o
+OBJ = min_heap_timer.o http_conn.o webserver.o
 
-http_parse.o:http_parse.cpp
-	g++ -c http_parse.cpp
+%.o: %.cpp
+	g++ -c -o $@  $< -I . -pthread
+
+webserver: $(OBJ)
+	g++ -o $@ $^ -I . -pthread
+
 clean:
-	rv *.o
+	rm *.o
