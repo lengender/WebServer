@@ -3,7 +3,7 @@ OBJ = min_heap_timer.o http_conn.o webserver.o
 %.o: %.cpp
 	g++ -c -o $@  $< -I . -pthread
 
-webserver: $(OBJ)
+server: $(OBJ)
 	g++ -o $@ $^ -I . -pthread
 
 clean:

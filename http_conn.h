@@ -24,10 +24,19 @@
 #include<stdio.h>
 #include<sys/mman.h>
 #include<stdarg.h>
+#include<strings.h>
+#include<ctype.h>
+#include<stdio.h>
+#include<sys/wait.h>
 #include<errno.h>
 #include"locker.h"
 #include"min_heap_timer.h"
 #include"webserver.h"
+
+
+#define STDIN 0
+#define STDOUT 1
+#define STDERR 2
 
 class heap_timer;
 class time_heap;
@@ -74,6 +83,7 @@ public:
     enum HTTP_CODE{
         NO_REQUEST,
         GET_REQUEST,
+        POST_REQUEST,
         BAD_REQUEST,
         NO_RESOURCE,
         FORBIDDEN_REQUEST,
@@ -101,10 +111,10 @@ public:
     void process();
 
     //非阻塞读操作
-    bool read();
+    bool read_socket();
 
     //非阻塞写操作
-    bool write();
+    bool write_socket();
 
 private:
     //初始化连接
@@ -120,7 +130,8 @@ private:
     HTTP_CODE parse_request_line(char *text);
     HTTP_CODE parse_headers(char *text);
     HTTP_CODE parse_content(char *text);
-    HTTP_CODE do_request();
+    HTTP_CODE do_get_request();
+    HTTP_CODE do_post_request();
     char* get_line() { return m_read_buf + m_start_line ;}
     LINE_STATUS parse_line();
 
@@ -192,6 +203,8 @@ private:
     //http请求的消息体的长度
     int m_content_length;
 
+    //消息实体
+    char m_content[FILENAME_LEN];
     //http请求是否要求保持连接
     bool m_linger;
 
